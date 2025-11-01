@@ -1,84 +1,85 @@
 import cv2
-import time
 import numpy as np
+import time
+import serial
+import os
 
-# Load face detector
+
+PORT = "/dev/ttyACM0"
+
+print("🔌 Resetting Arduino port...")
+os.system(f"stty -F {PORT} 1200")  
+time.sleep(1)
+print("✅ Arduino reset done, waiting for reboot...")
+time.sleep(2)  # give it time to restart
+
+# Serial
+arduino = None
+for attempt in range(5):
+    try:
+        print(f"Attempt {attempt+1}: Connecting to Arduino...")
+        arduino = serial.Serial(PORT, 9600, timeout=1)
+        time.sleep(2)
+        print("✅ Connected to Arduino successfully!")
+        break
+    except Exception as e:
+        print(f"❌ Connection failed: {e}")
+        time.sleep(2)
+
+if arduino is None:
+    print("❌ Could not connect to Arduino. Exiting.")
+    exit()
+
+# Config
+FRAME_WIDTH = 640
+FRAME_HEIGHT = 480
+CENTER_THRESHOLD = 80
+
 face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-
-# Start webcam
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
 
-prev_cx, prev_cy = None, None
-prev_time = time.time()
-
-direction = "Center"
-speed = 0
+print("🎥 Face Tracking Started! Press 'q' to quit")
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Convert to grayscale
+    frame = cv2.flip(frame, 1)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
 
-    # Detect faces
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    frame_center_x = FRAME_WIDTH // 2
+    movement_direction = "CENTERED"
 
-    # Assume one main face
-    for (x, y, w, h) in faces:
-        # Draw green box
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+    if len(faces) > 0:
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        face_center_x = x + w // 2
+        offset_x = face_center_x - frame_center_x
 
-        # Compute center
-        cx, cy = x + w // 2, y + h // 2
-        cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
+        if offset_x < -CENTER_THRESHOLD:
+            movement_direction = "LEFT"
+        elif offset_x > CENTER_THRESHOLD:
+            movement_direction = "RIGHT"
+        else:
+            movement_direction = "CENTERED"
 
-        # If previous center exists, compute movement
-        if prev_cx is not None:
-            dx = cx - prev_cx
-            dy = cy - prev_cy
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
+        cv2.circle(frame, (face_center_x, y + h // 2), 5, (0, 0, 255), -1)
 
-            # Compute direction
-            if abs(dx) > abs(dy):
-                if dx > 10:
-                    direction = "Right"
-                elif dx < -10:
-                    direction = "Left"
-                else:
-                    direction = "Center"
-            else:
-                if dy > 10:
-                    direction = "Down"
-                elif dy < -10:
-                    direction = "Up"
-                else:
-                    direction = "Center"
+    # Send to Arduino
+    arduino.write((movement_direction + "\n").encode())
 
-            # Compute speed (pixels/second)
-            curr_time = time.time()
-            dt = curr_time - prev_time
-            dist = np.sqrt(dx**2 + dy**2)
-            speed = dist / dt if dt > 0 else 0
-            prev_time = curr_time
+    cv2.putText(frame, f"Direction: {movement_direction}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    cv2.imshow("Auto Face Tracker", frame)
 
-        # Update previous
-        prev_cx, prev_cy = cx, cy
-
-        break  # Only first face
-
-    # Display direction and speed
-    cv2.putText(frame, f"Direction: {direction}", (30, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-    cv2.putText(frame, f"Speed: {speed:.2f} px/s", (30, 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-
-    cv2.imshow("Face Direction Tracker", frame)
-
-    # Exit on 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Cleanup
 cap.release()
+arduino.close()
 cv2.destroyAllWindows()
+print("👋 Tracking stopped.")
